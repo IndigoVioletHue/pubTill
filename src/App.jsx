@@ -6,7 +6,10 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
  * - Products referencing bands
  * - Overrides for individually-priced items
  * - Basket, Total, Change calculator
- * - Persists to localStorage
+ * - Bundle deals (e.g. 3 for £7, 2 for £12) auto-applied
+ * - Mixer button pinned on Spirits tab
+ * - Mobile-friendly layout + reduced layout shift in basket
+ * - Persists config to localStorage
  *
  * Money is stored as integer pence to avoid float issues.
  */
@@ -14,27 +17,33 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 // ---------- Helpers ----------
 const GBP = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" });
 const formatPence = (p) => GBP.format((p || 0) / 100);
+
+function uid() {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+/**
+ * Calculates best line total given bundle deals.
+ * Supports deals shaped like: { type:"bundle", qty:3, pricePence:700 }
+ */
 function bestLineTotalWithDeals({ unitPricePence, qty, deals }) {
-  // If no deals, simple total
   if (!deals || deals.length === 0 || qty <= 0) {
     return { totalPence: unitPricePence * qty, dealNote: null };
   }
 
-  // Only supporting "bundle" deals right now (e.g. 3 for 700)
-  const bundleDeals = deals.filter((d) => d && d.type === "bundle" && d.qty > 0 && d.pricePence >= 0);
+  const bundleDeals = deals.filter(
+    (d) => d && d.type === "bundle" && Number.isFinite(d.qty) && d.qty > 0 && Number.isFinite(d.pricePence) && d.pricePence >= 0
+  );
 
   if (bundleDeals.length === 0) {
     return { totalPence: unitPricePence * qty, dealNote: null };
   }
 
-  // Choose the cheapest outcome among all bundle options (single-type bundles)
-  // (If you ever add multiple different deals, this picks the best single deal schema.)
   let best = { totalPence: unitPricePence * qty, dealNote: null };
 
   for (const d of bundleDeals) {
     const bundles = Math.floor(qty / d.qty);
     const remainder = qty % d.qty;
-
     const total = bundles * d.pricePence + remainder * unitPricePence;
 
     if (total < best.totalPence) {
@@ -48,99 +57,41 @@ function bestLineTotalWithDeals({ unitPricePence, qty, deals }) {
   return best;
 }
 
-const clampInt = (n, min, max) => Math.max(min, Math.min(max, n));
-
-function uid() {
-  return Math.random().toString(36).slice(2, 10);
-}
-
 // ---------- Default Data Model ----------
+// You can replace this with your imported JSON config if you want.
 const DEFAULT_STATE = {
-  "pinEnabled": false,
-  "pin": "1234",
-  "bands": [
-    {
-      "id": "band-premium-spirits",
-      "name": "Premium Spirits",
-      "units": ["Single", "Double"],
-      "pricesPence": { "Single": 290, "Double": 490 }
-    },
-    {
-      "id": "band-top-shelf-spirits",
-      "name": "Top Shelf Spirits",
-      "units": ["Single", "Double"],
-      "pricesPence": { "Single": 310, "Double": 510 }
-    },
-    {
-      "id": "band-top-top-shelf-spirits",
-      "name": "Top Top Shelf Spirits",
-      "units": ["Single", "Double"],
-      "pricesPence": { "Single": 380, "Double": 670 }
-    },
-    {
-      "id": "band-low-abv",
-      "name": "Low ABV",
-      "units": ["Single", "Double"],
-      "pricesPence": { "Single": 260, "Double": 420 }
-    }
+  bands: [
+    { id: "band-premium", name: "Premium Spirits", units: ["Single", "Double"], pricesPence: { Single: 450, Double: 850 } },
+    { id: "band-topshelf", name: "Top Shelf Spirits", units: ["Single", "Double"], pricesPence: { Single: 550, Double: 1050 } },
+    { id: "band-toptop", name: "Top Top Shelf", units: ["Single", "Double"], pricesPence: { Single: 700, Double: 1350 } },
+    { id: "band-lowabv", name: "Low ABV", units: ["Half", "Pint"], pricesPence: { Half: 320, Pint: 620 } }
   ],
-  "products": [
-    { "id": "p-premium-spirit", "name": "Premium Spirit", "category": "Spirits", "bandId": "band-premium-spirits" },
-    { "id": "p-top-shelf-spirit", "name": "Top Shelf Spirit", "category": "Spirits", "bandId": "band-top-shelf-spirits" },
-    { "id": "p-top-top-shelf-spirit", "name": "Top Top Shelf Spirit", "category": "Spirits", "bandId": "band-top-top-shelf-spirits" },
-    { "id": "p-low-abv", "name": "Low ABV Drink", "category": "Spirits", "bandId": "band-low-abv" },
 
-    { "id": "p-staropramen", "name": "Staropramen", "category": "Draft", "units": ["Half", "Pint"], "pricesPence": { "Half": 220, "Pint": 440 } },
-    { "id": "p-cold-river-cider", "name": "Cold River Cider", "category": "Draft", "units": ["Half", "Pint"], "pricesPence": { "Half": 190, "Pint": 380 } },
+  products: [
+    { id: "p-gin1", name: "Tanqueray", category: "Spirits", bandId: "band-premium" },
+    { id: "p-vod1", name: "Smirnoff", category: "Spirits", bandId: "band-premium" },
+    { id: "p-vod2", name: "Grey Goose", category: "Spirits", bandId: "band-topshelf" },
+    { id: "p-teq1", name: "Don Julio 1942", category: "Spirits", bandId: "band-toptop" },
 
-    { "id": "p-atlantic-pale-ale", "name": "Atlantic Pale Ale", "category": "Draft", "units": ["Half", "Pint"], "pricesPence": { "Half": 190, "Pint": 380 }, "notes": "Priced same as Cold River Cider" },
-    { "id": "p-carling", "name": "Carling", "category": "Draft", "units": ["Half", "Pint"], "pricesPence": { "Half": 190, "Pint": 380 }, "notes": "Priced same as Cold River Cider" },
-    { "id": "p-doom-bar", "name": "Doom Bar", "category": "Draft", "units": ["Half", "Pint"], "pricesPence": { "Half": 190, "Pint": 380 }, "notes": "Priced same as Cold River Cider" },
+    { id: "p-guin", name: "Guinness", category: "Draft", units: ["Half", "Pint"], pricesPence: { Half: 340, Pint: 660 } },
+    { id: "p-lager", name: "House Lager", category: "Draft", units: ["Half", "Pint"], pricesPence: { Half: 310, Pint: 610 } },
 
-    { "id": "p-carling-dark-fruits", "name": "Carling Dark Fruits (Dark Fruits)", "category": "Draft", "units": ["Half", "Pint"], "pricesPence": { "Half": 195, "Pint": 390 } },
-    { "id": "p-guinness", "name": "Guinness", "category": "Draft", "units": ["Half", "Pint"], "pricesPence": { "Half": 225, "Pint": 450 } },
+    { id: "p-coke", name: "Coke", category: "Softs", units: ["Half", "Pint"], pricesPence: { Half: 160, Pint: 300 } },
 
-    { "id": "p-shots", "name": "Shots", "category": "Shots", "units": ["One"], "pricesPence": { "One": 290 } },
+    // Mixer charge exists in data but will be pinned on Spirits tab
+    { id: "p-mixer-charge", name: "Mixer Charge", category: "Add-ons", units: ["One"], pricesPence: { One: 70 } },
 
-    {
-      "id": "p-bombs",
-      "name": "Bombs",
-      "category": "Shots",
-      "units": ["One"],
-      "pricesPence": { "One": 290 },
-      "deals": [{ "type": "bundle", "qty": 3, "pricePence": 700 }]
-    },
+    // Deals example
+    { id: "p-bombs", name: "Bombs", category: "Shots", units: ["One"], pricesPence: { One: 290 }, deals: [{ type: "bundle", qty: 3, pricePence: 700 }] },
+    { id: "p-cocktail", name: "Cocktail", category: "Cocktails", units: ["One"], pricesPence: { One: 700 }, deals: [{ type: "bundle", qty: 2, pricePence: 1200 }] }
+  ],
 
-    { "id": "p-soft-drinks", "name": "Soft Drinks", "category": "Softs", "units": ["Half", "Pint"], "pricesPence": { "Half": 150, "Pint": 300 } },
-
-    { "id": "p-j20", "name": "J20", "category": "Softs", "units": ["One", "Mixer"], "pricesPence": { "One": 250, "Mixer": 200 } },
-
-    { "id": "p-mixer-charge", "name": "Mixer Charge", "category": "Add-ons", "units": ["One"], "pricesPence": { "One": 70 } },
-
-    { "id": "p-vape", "name": "Vape", "category": "Other", "units": ["One"], "pricesPence": { "One": 600 } },
-
-    {
-      "id": "p-cocktail",
-      "name": "Cocktail",
-      "category": "Cocktails",
-      "units": ["One"],
-      "pricesPence": { "One": 700 },
-      "deals": [{ "type": "bundle", "qty": 2, "pricePence": 1200 }]
-    },
-
-    { "id": "p-small-bottles", "name": "Small Bottles", "category": "Bottles", "units": ["One"], "pricesPence": { "One": 330 } },
-    { "id": "p-big-bottles", "name": "Big Bottles", "category": "Bottles", "units": ["One"], "pricesPence": { "One": 420 } },
-    { "id": "p-butty-back", "name": "Butty Back", "category": "Bottles", "units": ["One"], "pricesPence": { "One": 360 } },
-    { "id": "p-newcastle-brown-ale", "name": "Newcastle Brown Ale", "category": "Bottles", "units": ["One"], "pricesPence": { "One": 360 } },
-
-    { "id": "p-wine", "name": "Wine", "category": "Wine", "units": ["One"], "pricesPence": { "One": 350 } },
-    { "id": "p-hooch", "name": "Hooch", "category": "Bottles", "units": ["One"], "pricesPence": { "One": 400 } }
-  ]
+  pinEnabled: false,
+  pin: "1234",
 };
 
 const LS_KEY = "pub-till-prototype-v1";
 
-// ---------- App ----------
 export default function App() {
   const [state, setState] = useState(() => {
     const saved = localStorage.getItem(LS_KEY);
@@ -155,6 +106,9 @@ export default function App() {
   const [cashPence, setCashPence] = useState(0);
   const cashInputRef = useRef(null);
 
+  // Responsive layout
+  const [isMobile, setIsMobile] = useState(() => window.matchMedia("(max-width: 900px)").matches);
+
   // Admin/edit mode
   const [adminOpen, setAdminOpen] = useState(false);
   const [pinEntry, setPinEntry] = useState("");
@@ -164,6 +118,13 @@ export default function App() {
     localStorage.setItem(LS_KEY, JSON.stringify(state));
   }, [state]);
 
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 900px)");
+    const handler = (e) => setIsMobile(e.matches);
+    mq.addEventListener?.("change", handler);
+    return () => mq.removeEventListener?.("change", handler);
+  }, []);
+
   // Derived lookups
   const bandById = useMemo(() => {
     const map = new Map();
@@ -172,16 +133,41 @@ export default function App() {
   }, [state.bands]);
 
   const productById = useMemo(() => {
-  const map = new Map();
-  state.products.forEach((p) => map.set(p.id, p));
-  return map;
+    const map = new Map();
+    state.products.forEach((p) => map.set(p.id, p));
+    return map;
+  }, [state.products]);
+
+  // Hide Add-ons tab (mixer is pinned on Spirits)
+  const categories = useMemo(() => {
+    const set = new Set(state.products.map((p) => p.category));
+    return Array.from(set).filter((c) => c !== "Add-ons");
   }, [state.products]);
 
   const pinnedOnSpirits = useMemo(() => {
-  // Add-ons you want to show inside Spirits for speed
-  const ids = ["p-mixer-charge"];
-  return ids.map((id) => productById.get(id)).filter(Boolean);
+    const ids = ["p-mixer-charge"];
+    return ids.map((id) => productById.get(id)).filter(Boolean);
   }, [productById]);
+
+  const filteredProducts = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return state.products
+      .filter((p) => p.category === activeCategory)
+      .filter((p) => !q || p.name.toLowerCase().includes(q))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [state.products, activeCategory, search]);
+
+  function resolveUnitsAndPrices(product) {
+    // Override-priced product
+    if (product.pricesPence && product.units) {
+      return { units: product.units, pricesPence: product.pricesPence };
+    }
+
+    // Band-priced product
+    const band = bandById.get(product.bandId);
+    if (!band) return { units: ["One"], pricesPence: { One: 0 } };
+    return { units: band.units, pricesPence: band.pricesPence };
+  }
 
   function lineTotal(line) {
     const product = productById.get(line.productId);
@@ -196,45 +182,18 @@ export default function App() {
     return { totalPence, dealNote };
   }
 
-
-  const categories = useMemo(() => {
-    const set = new Set(state.products.map((p) => p.category));
-    return Array.from(set);
-  }, [state.products]);
-
-  const filteredProducts = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return state.products
-      .filter((p) => p.category === activeCategory)
-      .filter((p) => !q || p.name.toLowerCase().includes(q))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [state.products, activeCategory, search]);
-
   const totalPence = useMemo(() => {
     return basket.reduce((sum, line) => sum + lineTotal(line).totalPence, 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [basket, productById]);
 
-
   const changePence = useMemo(() => cashPence - totalPence, [cashPence, totalPence]);
-
-  function resolveUnitsAndPrices(product) {
-    // Override-priced product
-    if (product.pricesPence && product.units) {
-      return { units: product.units, pricesPence: product.pricesPence };
-    }
-
-    // Band-priced product
-    const band = bandById.get(product.bandId);
-    if (!band) return { units: ["One"], pricesPence: { One: 0 } };
-    return { units: band.units, pricesPence: band.pricesPence };
-  }
 
   function addToBasket(product, unit) {
     const { pricesPence } = resolveUnitsAndPrices(product);
     const pricePence = pricesPence[unit] ?? 0;
 
-    const label =
-      unit === "One" ? product.name : `${product.name} (${unit})`;
+    const label = unit === "One" ? product.name : `${product.name} (${unit})`;
 
     // Group lines by (productId + unit + price)
     const existingIndex = basket.findIndex(
@@ -242,9 +201,7 @@ export default function App() {
     );
 
     if (existingIndex >= 0) {
-      const next = basket.map((l, i) =>
-        i === existingIndex ? { ...l, qty: l.qty + 1 } : l
-      );
+      const next = basket.map((l, i) => (i === existingIndex ? { ...l, qty: l.qty + 1 } : l));
       setBasket(next);
       setLastAddKey(next[existingIndex].key);
       return;
@@ -265,6 +222,7 @@ export default function App() {
   function incQty(key) {
     setBasket((b) => b.map((l) => (l.key === key ? { ...l, qty: l.qty + 1 } : l)));
   }
+
   function decQty(key) {
     setBasket((b) =>
       b
@@ -272,6 +230,7 @@ export default function App() {
         .filter((l) => l.qty > 0)
     );
   }
+
   function removeLine(key) {
     setBasket((b) => b.filter((l) => l.key !== key));
   }
@@ -286,10 +245,10 @@ export default function App() {
     setBasket([]);
     setCashPence(0);
     setLastAddKey(null);
+    if (cashInputRef.current) cashInputRef.current.value = "";
   }
 
   function setCashFromPounds(input) {
-    // accept "12.34" or "12"
     const cleaned = (input || "").replace(/[^\d.]/g, "");
     const n = Number(cleaned);
     if (!Number.isFinite(n)) {
@@ -303,7 +262,7 @@ export default function App() {
   function openAdmin() {
     setAdminOpen(true);
     setPinEntry("");
-    setAuthed(!state.pinEnabled); // if pin not enabled, auto-auth
+    setAuthed(!state.pinEnabled);
   }
 
   function closeAdmin() {
@@ -359,21 +318,29 @@ export default function App() {
     reader.readAsText(file);
   }
 
-  // ---------- UI ----------
   return (
     <div style={styles.page}>
       <header style={styles.header}>
         <div>
-          <div style={styles.title}>Pub Till (Prototype)</div>
-          <div style={styles.subtitle}>Offline-friendly • Bands + overrides • Totals + change</div>
+          <div style={styles.title}>Pub Till</div>
+          <div style={styles.subtitle}>Offline-friendly • Deals + mixer pin • Total + change</div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
-          <button style={styles.btn} onClick={openAdmin}>Edit Prices</button>
-          <button style={styles.btnDanger} onClick={clearSale}>Clear Sale</button>
+          <button style={styles.btn} onClick={openAdmin}>
+            Edit Prices
+          </button>
+          <button style={styles.btnDanger} onClick={clearSale}>
+            Clear Sale
+          </button>
         </div>
       </header>
 
-      <main style={styles.main}>
+      <main
+        style={{
+          ...styles.main,
+          gridTemplateColumns: isMobile ? "1fr" : "1.2fr 0.8fr",
+        }}
+      >
         {/* Left: product picker */}
         <section style={styles.panel}>
           <div style={styles.tabs}>
@@ -398,84 +365,92 @@ export default function App() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
-            <button style={styles.btn} onClick={() => setSearch("")}>Clear</button>
+            <button style={styles.btn} onClick={() => setSearch("")}>
+              Clear
+            </button>
           </div>
 
-         <div style={styles.grid}>
-  {activeCategory === "Spirits" &&
-    pinnedOnSpirits.map((p) => {
-      const { units } = resolveUnitsAndPrices(p);
-      const unit = units?.[0] ?? "One";
-      const { pricesPence } = resolveUnitsAndPrices(p);
+          <div
+            style={{
+              ...styles.grid,
+              gridTemplateColumns: isMobile ? "repeat(2, minmax(0, 1fr))" : styles.grid.gridTemplateColumns,
+              maxHeight: isMobile ? "none" : styles.grid.maxHeight,
+            }}
+          >
+            {/* Pinned items on Spirits */}
+            {activeCategory === "Spirits" &&
+              pinnedOnSpirits.map((p) => {
+                const { units } = resolveUnitsAndPrices(p);
+                const unit = units?.[0] ?? "One";
+                const { pricesPence } = resolveUnitsAndPrices(p);
 
-      return (
-        <button
-          key={p.id}
-          style={{
-            ...styles.card,
-            border: "1px solid rgba(255,255,255,0.22)",
-            background: "rgba(255,255,255,0.10)",
-          }}
-          onClick={() => addToBasket(p, unit)}
-          title={`${p.name} • ${formatPence(pricesPence[unit] || 0)}`}
-        >
-          <div style={styles.cardName}>{p.name}</div>
-          <div style={styles.cardMeta}>{formatPence(pricesPence[unit] || 0)}</div>
-        </button>
-      );
-    })}
+                return (
+                  <button
+                    key={p.id}
+                    style={{
+                      ...styles.card,
+                      border: "1px solid rgba(255,255,255,0.22)",
+                      background: "rgba(255,255,255,0.10)",
+                    }}
+                    onClick={() => addToBasket(p, unit)}
+                    title={`${p.name} • ${formatPence(pricesPence[unit] || 0)}`}
+                  >
+                    <div style={styles.cardName}>{p.name}</div>
+                    <div style={styles.cardMeta}>{formatPence(pricesPence[unit] || 0)}</div>
+                  </button>
+                );
+              })}
 
-  {filteredProducts.map((p) => {
-    const { units } = resolveUnitsAndPrices(p);
+            {filteredProducts.map((p) => {
+              const { units } = resolveUnitsAndPrices(p);
 
-    if (units.length === 1) {
-      const unit = units[0];
-      const { pricesPence } = resolveUnitsAndPrices(p);
-      return (
-        <button
-          key={p.id}
-          style={styles.card}
-          onClick={() => addToBasket(p, unit)}
-          title={`${p.name} • ${formatPence(pricesPence[unit] || 0)}`}
-        >
-          <div style={styles.cardName}>{p.name}</div>
-          <div style={styles.cardMeta}>{formatPence(pricesPence[unit] || 0)}</div>
-        </button>
-      );
-    }
+              // If it's just one unit ("One"), make it single-tap
+              if (units.length === 1) {
+                const unit = units[0];
+                const { pricesPence } = resolveUnitsAndPrices(p);
+                return (
+                  <button
+                    key={p.id}
+                    style={styles.card}
+                    onClick={() => addToBasket(p, unit)}
+                    title={`${p.name} • ${formatPence(pricesPence[unit] || 0)}`}
+                  >
+                    <div style={styles.cardName}>{p.name}</div>
+                    <div style={styles.cardMeta}>{formatPence(pricesPence[unit] || 0)}</div>
+                  </button>
+                );
+              }
 
-    return (
-      <div key={p.id} style={styles.cardMulti}>
-        <div style={styles.cardName}>{p.name}</div>
-        <div style={styles.unitRow}>
-          {units.map((u) => {
-            const { pricesPence } = resolveUnitsAndPrices(p);
-            return (
-              <button
-                key={u}
-                style={styles.unitBtn}
-                onClick={() => addToBasket(p, u)}
-                title={`${u} • ${formatPence(pricesPence[u] || 0)}`}
-              >
-                <div style={{ fontWeight: 700 }}>{u}</div>
-                <div style={{ fontSize: 12, opacity: 0.85 }}>
-                  {formatPence(pricesPence[u] || 0)}
+              // Multi-unit: show product with unit buttons
+              return (
+                <div key={p.id} style={styles.cardMulti}>
+                  <div style={styles.cardName}>{p.name}</div>
+                  <div style={styles.unitRow}>
+                    {units.map((u) => {
+                      const { pricesPence } = resolveUnitsAndPrices(p);
+                      return (
+                        <button
+                          key={u}
+                          style={styles.unitBtn}
+                          onClick={() => addToBasket(p, u)}
+                          title={`${u} • ${formatPence(pricesPence[u] || 0)}`}
+                        >
+                          <div style={{ fontWeight: 800 }}>{u}</div>
+                          <div style={{ fontSize: 12, opacity: 0.85 }}>{formatPence(pricesPence[u] || 0)}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    );
-  })}
-</div>
-
+              );
+            })}
+          </div>
         </section>
 
         {/* Right: basket + totals */}
         <section style={styles.panel}>
           <div style={styles.panelHeader}>
-            <div style={{ fontWeight: 800, fontSize: 18 }}>Basket</div>
+            <div style={{ fontWeight: 900, fontSize: 18 }}>Basket</div>
             <button style={styles.btn} onClick={undoLastAdd} disabled={!basket.length}>
               Undo
             </button>
@@ -485,50 +460,83 @@ export default function App() {
             {basket.length === 0 ? (
               <div style={{ opacity: 0.7 }}>Add items to start a sale.</div>
             ) : (
-              basket.map((l) => (
-                <div key={l.key} style={styles.line}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 700 }}>{l.label}</div>
-                    <div style={{ opacity: 0.8 }}>{formatPence(l.pricePence)} each</div>
-                  </div>
+              basket.map((l) => {
+                const { totalPence: lineTotalPence, dealNote } = lineTotal(l);
 
-                  <div style={styles.qtyBox}>
-                    <button style={styles.qtyBtn} onClick={() => decQty(l.key)}>-</button>
-                    <div style={{ width: 24, textAlign: "center", fontWeight: 800 }}>{l.qty}</div>
-                    <button style={styles.qtyBtn} onClick={() => incQty(l.key)}>+</button>
-                  </div>
-
-                  {(() => {
-                    const { totalPence: lineTotalPence, dealNote } = lineTotal(l);
-                    return (
-                      <div style={{ width: 120, textAlign: "right" }}>
-                        <div style={{ fontWeight: 800 }}>{formatPence(lineTotalPence)}</div>
-                        {dealNote && (
-                          <div style={{ fontSize: 12, opacity: 0.8, marginTop: 2 }}>
-                            Deal: {dealNote}
-                          </div>
-                        )}
+                return (
+                  <div key={l.key} style={styles.line}>
+                    <div style={{ minWidth: 0 }}>
+                      <div
+                        style={{
+                          fontWeight: 800,
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        }}
+                        title={l.label}
+                      >
+                        {l.label}
                       </div>
-                    );
-                  })()}
+                      <div
+                        style={{
+                          opacity: 0.8,
+                          fontSize: 12,
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        }}
+                      >
+                        {formatPence(l.pricePence)} each
+                        {dealNote ? ` • Deal active` : ""}
+                      </div>
+                    </div>
 
+                    <div style={styles.qtyBox}>
+                      <button style={styles.qtyBtn} onClick={() => decQty(l.key)}>
+                        -
+                      </button>
+                      <div style={{ width: 24, textAlign: "center", fontWeight: 900 }}>{l.qty}</div>
+                      <button style={styles.qtyBtn} onClick={() => incQty(l.key)}>
+                        +
+                      </button>
+                    </div>
 
-                  <button style={styles.trashBtn} onClick={() => removeLine(l.key)} title="Remove">
-                    ×
-                  </button>
-                </div>
-              ))
+                    <div style={{ width: 92, textAlign: "right" }}>
+                      <div style={{ fontWeight: 900 }}>{formatPence(lineTotalPence)}</div>
+                      {dealNote && (
+                        <div style={{ fontSize: 12, opacity: 0.8, marginTop: 2 }}>
+                          Deal: {dealNote}
+                        </div>
+                      )}
+                    </div>
+
+                    <button style={styles.trashBtn} onClick={() => removeLine(l.key)} title="Remove">
+                      ×
+                    </button>
+                  </div>
+                );
+              })
             )}
           </div>
 
-          <div style={styles.totalBox}>
+          <div
+            style={{
+              ...styles.totalBox,
+              position: isMobile ? "sticky" : "static",
+              bottom: isMobile ? 0 : "auto",
+              background: isMobile ? "rgba(11,15,22,0.92)" : "transparent",
+              backdropFilter: isMobile ? "blur(10px)" : "none",
+              padding: isMobile ? 10 : 0,
+              borderRadius: isMobile ? 14 : 0,
+            }}
+          >
             <div style={styles.totalRow}>
               <div>Total</div>
-              <div style={{ fontWeight: 900, fontSize: 22 }}>{formatPence(totalPence)}</div>
+              <div style={{ fontWeight: 1000, fontSize: 22 }}>{formatPence(totalPence)}</div>
             </div>
 
             <div style={styles.cashRow}>
-              <div style={{ fontWeight: 700 }}>Cash received</div>
+              <div style={{ fontWeight: 800 }}>Cash received</div>
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                 <input
                   ref={cashInputRef}
@@ -536,7 +544,13 @@ export default function App() {
                   placeholder="e.g. 20"
                   onChange={(e) => setCashFromPounds(e.target.value)}
                 />
-                <button style={styles.btn} onClick={() => { setCashPence(totalPence); if (cashInputRef.current) cashInputRef.current.value = (totalPence/100).toFixed(2); }}>
+                <button
+                  style={styles.btn}
+                  onClick={() => {
+                    setCashPence(totalPence);
+                    if (cashInputRef.current) cashInputRef.current.value = (totalPence / 100).toFixed(2);
+                  }}
+                >
                   Exact
                 </button>
               </div>
@@ -559,9 +573,7 @@ export default function App() {
 
             <div style={styles.totalRow}>
               <div>{changePence >= 0 ? "Change" : "Still owed"}</div>
-              <div style={{ fontWeight: 900, fontSize: 22 }}>
-                {formatPence(Math.abs(changePence))}
-              </div>
+              <div style={{ fontWeight: 1000, fontSize: 22 }}>{formatPence(Math.abs(changePence))}</div>
             </div>
           </div>
         </section>
@@ -572,8 +584,10 @@ export default function App() {
         <div style={styles.modalOverlay} onClick={closeAdmin}>
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
             <div style={styles.modalHeader}>
-              <div style={{ fontWeight: 900, fontSize: 18 }}>Edit Prices</div>
-              <button style={styles.trashBtn} onClick={closeAdmin} title="Close">×</button>
+              <div style={{ fontWeight: 1000, fontSize: 18 }}>Edit Prices</div>
+              <button style={styles.trashBtn} onClick={closeAdmin} title="Close">
+                ×
+              </button>
             </div>
 
             {!authed && (
@@ -587,8 +601,12 @@ export default function App() {
                   type="password"
                 />
                 <div style={{ display: "flex", gap: 8 }}>
-                  <button style={styles.btn} onClick={tryPin}>Unlock</button>
-                  <button style={styles.btn} onClick={closeAdmin}>Cancel</button>
+                  <button style={styles.btn} onClick={tryPin}>
+                    Unlock
+                  </button>
+                  <button style={styles.btn} onClick={closeAdmin}>
+                    Cancel
+                  </button>
                 </div>
               </div>
             )}
@@ -596,11 +614,11 @@ export default function App() {
             {authed && (
               <div style={{ display: "grid", gap: 16 }}>
                 <section>
-                  <div style={{ fontWeight: 800, marginBottom: 8 }}>Bands</div>
+                  <div style={{ fontWeight: 900, marginBottom: 8 }}>Bands</div>
                   <div style={{ display: "grid", gap: 10 }}>
                     {state.bands.map((b) => (
                       <div key={b.id} style={styles.editCard}>
-                        <div style={{ fontWeight: 800 }}>{b.name}</div>
+                        <div style={{ fontWeight: 900 }}>{b.name}</div>
                         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                           {b.units.map((u) => (
                             <label key={u} style={styles.editField}>
@@ -623,13 +641,13 @@ export default function App() {
                 </section>
 
                 <section>
-                  <div style={{ fontWeight: 800, marginBottom: 8 }}>Overrides (individually priced)</div>
+                  <div style={{ fontWeight: 900, marginBottom: 8 }}>Overrides (individually priced)</div>
                   <div style={{ display: "grid", gap: 10 }}>
                     {state.products
                       .filter((p) => p.pricesPence && p.units)
                       .map((p) => (
                         <div key={p.id} style={styles.editCard}>
-                          <div style={{ fontWeight: 800 }}>{p.name}</div>
+                          <div style={{ fontWeight: 900 }}>{p.name}</div>
                           <div style={{ opacity: 0.8, fontSize: 12 }}>{p.category}</div>
                           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 6 }}>
                             {p.units.map((u) => (
@@ -653,7 +671,9 @@ export default function App() {
                 </section>
 
                 <section style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <button style={styles.btn} onClick={exportJson}>Export JSON</button>
+                  <button style={styles.btn} onClick={exportJson}>
+                    Export JSON
+                  </button>
                   <label style={styles.btn} title="Import JSON">
                     Import JSON
                     <input
@@ -680,7 +700,7 @@ export default function App() {
                 </section>
 
                 <section style={{ borderTop: "1px solid rgba(255,255,255,0.12)", paddingTop: 12 }}>
-                  <div style={{ fontWeight: 800, marginBottom: 8 }}>PIN</div>
+                  <div style={{ fontWeight: 900, marginBottom: 8 }}>PIN</div>
                   <label style={styles.checkboxRow}>
                     <input
                       type="checkbox"
@@ -696,9 +716,6 @@ export default function App() {
                       onBlur={(e) => setState((s) => ({ ...s, pin: e.target.value || "1234" }))}
                       placeholder="New PIN"
                     />
-                    <button style={styles.btn} onClick={() => alert("PIN saved on blur (click away).")}>
-                      Help
-                    </button>
                   </div>
                 </section>
               </div>
@@ -707,18 +724,17 @@ export default function App() {
         </div>
       )}
 
-      <footer style={styles.footer}>
-        Tip: keep everything as categories + bands; only override draft/softs that need special prices.
-      </footer>
+      <footer style={styles.footer}>Tip: Mixer Charge is pinned on Spirits. Deals auto-apply for Bombs/Cocktails.</footer>
     </div>
   );
 }
 
-// ---------- Styles (no CSS file needed) ----------
+// ---------- Styles ----------
 const styles = {
   page: {
     minHeight: "100vh",
-    background: "radial-gradient(1200px 800px at 20% 0%, rgba(255,255,255,0.08), transparent), #0b0f16",
+    background:
+      "radial-gradient(1200px 800px at 20% 0%, rgba(255,255,255,0.08), transparent), #0b0f16",
     color: "white",
     fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
   },
@@ -733,8 +749,9 @@ const styles = {
     background: "rgba(11,15,22,0.8)",
     backdropFilter: "blur(10px)",
     zIndex: 5,
+    gap: 12,
   },
-  title: { fontSize: 18, fontWeight: 900 },
+  title: { fontSize: 18, fontWeight: 1000 },
   subtitle: { fontSize: 12, opacity: 0.75, marginTop: 2 },
 
   main: {
@@ -742,7 +759,9 @@ const styles = {
     gridTemplateColumns: "1.2fr 0.8fr",
     gap: 14,
     padding: 14,
+    alignItems: "start",
   },
+
   panel: {
     background: "rgba(255,255,255,0.06)",
     border: "1px solid rgba(255,255,255,0.10)",
@@ -751,11 +770,13 @@ const styles = {
     boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
     minHeight: 0,
   },
+
   panelHeader: {
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
     marginBottom: 10,
+    gap: 8,
   },
 
   tabs: {
@@ -771,7 +792,7 @@ const styles = {
     background: "rgba(255,255,255,0.06)",
     color: "white",
     cursor: "pointer",
-    fontWeight: 700,
+    fontWeight: 800,
     fontSize: 13,
   },
   tabActive: {
@@ -798,7 +819,8 @@ const styles = {
     background: "rgba(255,255,255,0.10)",
     color: "white",
     cursor: "pointer",
-    fontWeight: 800,
+    fontWeight: 900,
+    whiteSpace: "nowrap",
   },
   btnDanger: {
     padding: "10px 12px",
@@ -807,17 +829,19 @@ const styles = {
     background: "rgba(255,80,80,0.18)",
     color: "white",
     cursor: "pointer",
-    fontWeight: 900,
+    fontWeight: 1000,
+    whiteSpace: "nowrap",
   },
 
   grid: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))",
+    gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))",
     gap: 10,
     maxHeight: "calc(100vh - 190px)",
     overflow: "auto",
     paddingRight: 4,
   },
+
   card: {
     textAlign: "left",
     borderRadius: 16,
@@ -825,14 +849,16 @@ const styles = {
     background: "rgba(0,0,0,0.22)",
     padding: 12,
     cursor: "pointer",
+    minHeight: 74,
   },
   cardMulti: {
     borderRadius: 16,
     border: "1px solid rgba(255,255,255,0.12)",
     background: "rgba(0,0,0,0.22)",
     padding: 12,
+    minHeight: 74,
   },
-  cardName: { fontWeight: 900, marginBottom: 6 },
+  cardName: { fontWeight: 1000, marginBottom: 6 },
   cardMeta: { opacity: 0.8, fontSize: 13 },
   unitRow: { display: "flex", gap: 8, flexWrap: "wrap" },
   unitBtn: {
@@ -852,8 +878,11 @@ const styles = {
     overflow: "auto",
     paddingRight: 4,
   },
+
+  // grid basket row to prevent layout shift
   line: {
-    display: "flex",
+    display: "grid",
+    gridTemplateColumns: "1fr auto 92px 34px",
     gap: 10,
     alignItems: "center",
     padding: 10,
@@ -861,7 +890,9 @@ const styles = {
     background: "rgba(0,0,0,0.20)",
     border: "1px solid rgba(255,255,255,0.10)",
     marginBottom: 8,
+    minWidth: 0,
   },
+
   qtyBox: {
     display: "flex",
     alignItems: "center",
@@ -879,7 +910,7 @@ const styles = {
     background: "rgba(255,255,255,0.10)",
     color: "white",
     cursor: "pointer",
-    fontWeight: 900,
+    fontWeight: 1000,
   },
   trashBtn: {
     width: 34,
@@ -889,7 +920,7 @@ const styles = {
     background: "rgba(255,255,255,0.08)",
     color: "white",
     cursor: "pointer",
-    fontWeight: 900,
+    fontWeight: 1000,
     lineHeight: "30px",
   },
 
@@ -900,10 +931,12 @@ const styles = {
     display: "grid",
     gap: 10,
   },
+
   totalRow: {
     display: "flex",
     justifyContent: "space-between",
     alignItems: "baseline",
+    gap: 10,
   },
   cashRow: { display: "grid", gap: 8 },
   quickCash: { display: "flex", gap: 8, flexWrap: "wrap" },
@@ -914,7 +947,8 @@ const styles = {
     background: "rgba(255,255,255,0.10)",
     color: "white",
     cursor: "pointer",
-    fontWeight: 900,
+    fontWeight: 1000,
+    whiteSpace: "nowrap",
   },
 
   footer: {
@@ -947,6 +981,7 @@ const styles = {
     justifyContent: "space-between",
     alignItems: "center",
     marginBottom: 10,
+    gap: 10,
   },
   editCard: {
     padding: 10,
